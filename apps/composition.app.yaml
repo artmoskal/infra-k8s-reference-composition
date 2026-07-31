@@ -1,0 +1,154 @@
+# Generic composition fixture.
+#
+# This exists to prove the C1 substrate -- disposable state, typed secret and
+# config references, dependency-ordered bootstrap, a public route, and a
+# path-protected admin surface -- COMPOSES for any workload, before any vendor
+# profile consumes it. It deliberately names no product: if this fixture ever
+# needs a vendor-specific concession, the substrate is not generic and the
+# framework has a defect, not the profile.
+apiVersion: infra-k8s.artemm.io/v1alpha1
+kind: App
+metadata:
+  name: fixture-composition
+  namespace: fixture-composition
+spec:
+  artifacts:
+    - name: postgres
+      source:
+        externalImage:
+          reference: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    - name: nginx
+      source:
+        externalImage:
+          reference: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+  inputs:
+    - name: credentials
+      kind: secret
+      keys:
+        - db-password
+    - name: settings
+      kind: config
+      keys:
+        - public-host
+  services:
+    - name: database
+      runtime:
+        container:
+          process:
+            artifact: postgres
+            env:
+              - name: POSTGRES_DB
+                value: fixture
+              - name: POSTGRES_USER
+                value: fixture
+            projections:
+              - source:
+                  input: credentials
+                  key: db-password
+                target:
+                  env:
+                    name: POSTGRES_PASSWORD
+            resources:
+              cpu: 250m
+              memory: 512Mi
+          replicas: 1
+          ports:
+            - name: postgres
+              servicePort: 5432
+              containerPort: 5432
+          # Kubernetes calls a probe-less container Ready the moment it
+          # starts, before PostgreSQL accepts connections; the seed job's
+          # controller retries would then quietly paper over the race. C1
+          # requires an OBSERVED readiness signal before the dependency-ordered
+          # bootstrap. The engine's typed Probe owner is port-based, and
+          # PostgreSQL accepts TCP only once it is ready to serve, so the
+          # bounded real signal here is TCP-accept on the declared port.
+          readiness:
+            kind: tcp
+            port: postgres
+    - name: web
+      runtime:
+        container:
+          process:
+            artifact: nginx
+            env:
+              - name: DATABASE_HOST
+                value: database
+            projections:
+              # Projected as a FILE the stock server actually serves, so the
+              # live probe GET /config/public-host proves the config input was
+              # materialized end to end -- not merely mounted somewhere.
+              - source:
+                  input: settings
+                  key: public-host
+                target:
+                  file:
+                    path: /usr/share/nginx/html/config/public-host
+            resources:
+              cpu: 100m
+              memory: 128Mi
+          replicas: 1
+          ports:
+            # The stock nginx image listens on 80; declaring another container
+            # port would route the Service to a dead listener.
+            - name: http
+              servicePort: 8080
+              containerPort: 80
+  jobs:
+    - name: bootstrap
+      process:
+        artifact: postgres
+        env:
+          - name: PGHOST
+            value: database
+          - name: PGUSER
+            value: fixture
+          - name: PGDATABASE
+            value: fixture
+        projections:
+          - source:
+              input: credentials
+              key: db-password
+            target:
+              env:
+                name: PGPASSWORD
+        resources:
+          cpu: 100m
+          memory: 128Mi
+      # A REAL idempotent seed through direct psql argv -- no shell program
+      # string, per C1's binding constraint. Re-running it must change
+      # nothing: CREATE ... IF NOT EXISTS plus ON CONFLICT DO NOTHING is what
+      # makes the no-op reapply provable at the data layer.
+      args:
+        - psql
+        - -v
+        - ON_ERROR_STOP=1
+        - -c
+        - CREATE TABLE IF NOT EXISTS composition_seed (id integer PRIMARY KEY, note text NOT NULL)
+        - -c
+        - INSERT INTO composition_seed (id, note) VALUES (1, 'seeded') ON CONFLICT (id) DO NOTHING
+      run:
+        once: {}
+  storage:
+    - name: data
+      class: durable
+      access: per-replica
+      size: 1Gi
+  mounts:
+    - workload: database
+      storage: data
+      path: /var/lib/postgresql/data
+  dependencies:
+    - workload: bootstrap
+      needs: database
+      mode: ready
+    - workload: web
+      needs: bootstrap
+      mode: completed
+  routes:
+    - name: frontend
+      service: web
+      port: http
+      expose: public
+      auth: sso
+      mode: http
