@@ -1,0 +1,27 @@
+apiVersion: infra-k8s.artemm.io/v1alpha1
+kind: App
+metadata:
+  name: recovery-smoke
+  namespace: recovery-smoke
+spec:
+  artifacts:
+    - name: nginx
+      source:
+        externalImage:
+          reference: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+  services:
+    - name: web
+      runtime:
+        container:
+          process:
+            artifact: nginx
+          replicas: 2
+          ports:
+            - name: http
+              servicePort: 80
+              containerPort: 80
+          readiness:
+            kind: http
+            port: http
+            path: /
+            periodSeconds: 2
