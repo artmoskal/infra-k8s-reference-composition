@@ -67,6 +67,8 @@ spec:
       run:
         schedule:
           cron: "17 */6 * * *"
+      operator:
+        maxTimeoutSeconds: 120
   storage:
     - name: data
       class: durable
