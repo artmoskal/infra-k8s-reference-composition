@@ -1,0 +1,139 @@
+# Provider-neutral P2 recovery fixture. The source image is built where the
+# Target selects; this App owns only workload, state, input, and bounded
+# operation intent.
+apiVersion: infra-k8s.artemm.io/v1alpha1
+kind: App
+metadata:
+  name: stateful-recovery
+  namespace: stateful-recovery
+spec:
+  artifacts:
+    - name: api
+      source:
+        sourceBuild:
+          context: services/stateful-recovery
+          recipe: Dockerfile
+  inputs:
+    - name: credentials
+      kind: secret
+      keys:
+        - auth-token
+    - name: settings
+      kind: config
+      keys:
+        - deployment-id
+  services:
+    - name: api
+      runtime:
+        container:
+          process:
+            artifact: api
+            projections:
+              - source:
+                  input: credentials
+                  key: auth-token
+                target:
+                  env:
+                    name: RECOVERY_TOKEN
+              - source:
+                  input: settings
+                  key: deployment-id
+                target:
+                  env:
+                    name: RECOVERY_DEPLOYMENT_ID
+            resources:
+              cpu: 100m
+              memory: 128Mi
+          replicas: 1
+          ports:
+            - name: http
+              servicePort: 8080
+              containerPort: 8080
+          readiness:
+            kind: http
+            port: http
+            path: /health
+            periodSeconds: 2
+  jobs:
+    - name: audit
+      process:
+        artifact: api
+        resources:
+          cpu: 50m
+          memory: 64Mi
+      args:
+        - audit
+        - /data/records.json
+      run:
+        schedule:
+          cron: "17 */6 * * *"
+  storage:
+    - name: data
+      class: durable
+      access: shared
+      size: 1Gi
+      recovery:
+        consistency: filesystem
+        pairedInputs:
+          - input: credentials
+            key: auth-token
+          - input: settings
+            key: deployment-id
+  mounts:
+    - workload: api
+      storage: data
+      path: /data
+    - workload: audit
+      storage: data
+      path: /data
+  operations:
+    - name: write-known-record
+      action:
+        exec:
+          service: api
+          container: api
+          command:
+            - python3
+            - /app/recovery_fixture.py
+            - client-put
+            - known
+            - p2-state-survives
+          timeoutSeconds: 60
+          maxOutputBytes: 4096
+    - name: read-known-record
+      action:
+        exec:
+          service: api
+          container: api
+          command:
+            - python3
+            - /app/recovery_fixture.py
+            - client-get
+            - known
+          timeoutSeconds: 60
+          maxOutputBytes: 4096
+    - name: checksum-records
+      action:
+        exec:
+          service: api
+          container: api
+          command:
+            - python3
+            - /app/recovery_fixture.py
+            - checksum
+            - /data/records.json
+          timeoutSeconds: 60
+          maxOutputBytes: 4096
+    - name: fetch-records
+      action:
+        fetchArtifact:
+          service: api
+          container: api
+          path: /data/records.json
+          timeoutSeconds: 60
+          maxBytes: 65536
+    - name: restart-api
+      action:
+        restart:
+          service: api
+          timeoutSeconds: 180
