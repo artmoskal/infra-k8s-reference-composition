@@ -74,6 +74,7 @@ spec:
       size: 1Gi
       recovery:
         consistency: filesystem
+        verify: read-known-record
         pairedInputs:
           - input: credentials
             key: auth-token
